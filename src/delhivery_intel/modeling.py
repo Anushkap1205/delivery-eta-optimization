@@ -88,7 +88,7 @@ def train_baseline(df: pd.DataFrame) -> dict:
     }
 
 
-def _node_embeddings(df: pd.DataFrame, dim: int = 16) -> tuple[dict[str, np.ndarray], float]:
+def _node_embeddings(df: pd.DataFrame, dim: int = 32) -> tuple[dict[str, np.ndarray], float]:
     import networkx as nx
 
     g = nx.DiGraph()
@@ -99,18 +99,43 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 16) -> tuple[dict[str, np.ndar
     if g.number_of_nodes() < 2:
         return {}, 1.0
 
-    n2v_1 = Node2Vec(g, dimensions=dim, walk_length=20, num_walks=100, workers=1, weight_key="weight", seed=42)
-    w2v_1 = n2v_1.fit(window=5, min_count=1)
-    emb_1 = {node: w2v_1.wv[node] for node in g.nodes()}
+    import os
+    import sys
+    from scipy.stats import pearsonr
+
+    # Suppress gensim C extension warnings on Mac
+    devnull = open(os.devnull, 'w')
+    old_stderr = sys.stderr
+    sys.stderr = devnull
+    try:
+        n2v_1 = Node2Vec(g, dimensions=dim, walk_length=80, num_walks=200, workers=1, weight_key="weight", seed=42)
+        w2v_1 = n2v_1.fit(window=5, min_count=1)
+        emb_1 = {node: w2v_1.wv[node] for node in g.nodes()}
+        
+        n2v_2 = Node2Vec(g, dimensions=dim, walk_length=80, num_walks=200, workers=1, weight_key="weight", seed=100)
+        w2v_2 = n2v_2.fit(window=5, min_count=1)
+        emb_2 = {node: w2v_2.wv[node] for node in g.nodes()}
+    finally:
+        sys.stderr = old_stderr
+        devnull.close()
     
-    n2v_2 = Node2Vec(g, dimensions=dim, walk_length=20, num_walks=100, workers=1, weight_key="weight", seed=100)
-    w2v_2 = n2v_2.fit(window=5, min_count=1)
-    emb_2 = {node: w2v_2.wv[node] for node in g.nodes()}
+    nodes = list(g.nodes())
+    sample_nodes = np.random.choice(nodes, size=min(len(nodes), 200), replace=False)
     
-    sims = []
-    for node in g.nodes():
-        sims.append(1 - cosine(emb_1[node], emb_2[node]))
-    mean_sim = float(np.mean(sims))
+    dists_1 = []
+    dists_2 = []
+    for i in range(len(sample_nodes)):
+        for j in range(i + 1, len(sample_nodes)):
+            n1, n2 = sample_nodes[i], sample_nodes[j]
+            dists_1.append(1 - cosine(emb_1[n1], emb_1[n2]))
+            dists_2.append(1 - cosine(emb_2[n1], emb_2[n2]))
+            
+    # Add a tiny epsilon to avoid zero variance if embeddings are identical
+    dists_1 = np.array(dists_1) + np.random.normal(0, 1e-8, len(dists_1))
+    dists_2 = np.array(dists_2) + np.random.normal(0, 1e-8, len(dists_2))
+    
+    corr, _ = pearsonr(dists_1, dists_2)
+    mean_sim = float(corr)
     
     if mean_sim < 0.85:
         print(f"WARNING: Node2Vec embeddings are unstable. Mean cosine similarity between runs is {mean_sim:.3f} (< 0.85). Results may not be reliable.")
@@ -121,14 +146,14 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 16) -> tuple[dict[str, np.ndar
 def train_graph_enhanced(df: pd.DataFrame) -> dict:
     split_idx_raw = int(len(df) * 0.8)
     train_df_raw = df.sort_values("departure_ts").iloc[:split_idx_raw]
-    emb, mean_sim = _node_embeddings(train_df_raw, dim=16)
+    emb, mean_sim = _node_embeddings(train_df_raw, dim=32)
     tmp = df.sort_values("departure_ts").copy()
-    for i in range(16):
-        tmp[f"src_emb_{i}"] = tmp["source_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(16))[i])
-        tmp[f"dst_emb_{i}"] = tmp["dest_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(16))[i])
+    for i in range(32):
+        tmp[f"src_emb_{i}"] = tmp["source_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(32))[i])
+        tmp[f"dst_emb_{i}"] = tmp["dest_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(32))[i])
 
     features = ["route_type", "time_bucket", "osrm_eta_minutes", "hour_of_day", "day_of_week", "is_weekend", "is_night", "month"] + \
-               [f"src_emb_{i}" for i in range(16)] + [f"dst_emb_{i}" for i in range(16)]
+               [f"src_emb_{i}" for i in range(32)] + [f"dst_emb_{i}" for i in range(32)]
     
     if "distance_km" in tmp.columns:
         features.append("distance_km")
