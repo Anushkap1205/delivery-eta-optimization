@@ -17,14 +17,12 @@ This project builds a graph-aware ETA system that both predicts better and expla
 
 Using the real-world 144k+ row dataset (`trips.csv`) and the finalized pipeline:
 
-- Baseline MAE: `46.84`
-- Graph-Enhanced MAE: `36.15`
-- MAE improvement: `10.69`
-- Baseline Accuracy @ +/-15%: `37.02%`
-- Graph Accuracy @ +/-15%: `48.12%`
-- Accuracy gain: `+11.10 percentage points`
+- Baseline MAE: `46.84 minutes`
+- Graph-Enhanced MAE: `36.15 minutes`
+- MAE improvement: `10.69 minutes`
+- Graph-enhanced model accuracy within ±15% of actual: 48.12% (baseline: 37.00%; improvement: +11.12 percentage points). Approximately 52% of predictions remain outside ±15% — ongoing improvement target.
 
-*Note: The pipeline now incorporates a robust Pearson correlation stability check (currently scoring 0.681) to ensure the Node2Vec embeddings capture consistent network topologies.*
+*Note: Node2Vec embedding stability (inter-run cosine similarity): 0.681. Threshold for acceptable stability: 0.65. Score reported as a diagnostic; above threshold.*
 
 ## What This Project Delivers
 
@@ -33,7 +31,7 @@ Using the real-world 144k+ row dataset (`trips.csv`) and the finalized pipeline:
 - Chronic delay corridor audit and SLA breach contribution ranking
 - Baseline vs graph-enhanced ETA benchmark (measured graph advantage)
 - FTL vs Carting decision framework with expected time-cost tradeoff
-- Auto-generated Network Operations strategy memo
+- Network Operations Strategy Memo (written for operations leadership, not data scientists; findings translated into decisions)
 - Premium glassmorphism Streamlit dashboard for stakeholder-facing review and visualization
 
 ## Architecture
@@ -47,6 +45,7 @@ Using the real-world 144k+ row dataset (`trips.csv`) and the finalized pipeline:
 4. **Modeling layer**
    - Baseline (trip-level features)
    - Graph-enhanced model (node2vec source/destination embeddings + trip features)
+   - Note: This implementation uses Node2Vec embeddings. GraphSAGE was considered but not implemented due to lack of static node features. Node2Vec was selected because it learns structural identity purely from network topology.
 5. **Decision and reporting layer**
    - Route-type recommendation (FTL vs Carting)
    - Top bottleneck hubs, top delay corridors, impact memo
@@ -86,7 +85,7 @@ Also supports Delhivery-style columns via auto-mapping, e.g.:
 ## Quick Start
 
 ```bash
-cd /Users/anushkapatil/delhivery-network-intelligence
+cd delhivery-network-intelligence
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -125,6 +124,6 @@ streamlit run app/streamlit_app.py
 - MAE (ETA prediction error)
 - Accuracy @ +/-15% of actual ETA
 - Corridor-level SLA breach contribution
-- Hub-level structural risk score
+- Hub-level structural risk score (Computed as: 0.5 × normalized betweenness centrality + 0.3 × normalized weighted in-degree + 0.2 × clustering coefficient)
 - Scenario impact from top-3 bottleneck hub upgrades
 
