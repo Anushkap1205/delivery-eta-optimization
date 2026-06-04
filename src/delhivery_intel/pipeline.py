@@ -25,8 +25,9 @@ def _normalize_input_schema(df: pd.DataFrame) -> pd.DataFrame:
     if "is_cutoff" in out.columns:
         cutoff = out["is_cutoff"].astype(str).str.lower()
         final_rows = out[cutoff.isin(["false", "0"])].copy()
-        if not final_rows.empty:
-            out = final_rows
+        if final_rows.empty:
+            raise ValueError("All rows are cutoff snapshots — no final trip records found. Check is_cutoff column values.")
+        out = final_rows
 
     return out
 
@@ -56,16 +57,23 @@ def load_and_prepare(input_path: str) -> pd.DataFrame:
     df = df.dropna(
         subset=["source_facility", "dest_facility", "route_type", "osrm_eta_minutes", "actual_transit_minutes"]
     ).copy()
+    df["osrm_eta_minutes"] = pd.to_numeric(df["osrm_eta_minutes"], errors="coerce")
+    df["actual_transit_minutes"] = pd.to_numeric(df["actual_transit_minutes"], errors="coerce")
     df = df[(df["osrm_eta_minutes"] > 0) & (df["actual_transit_minutes"] > 0)].copy()
 
     if "departure_ts" in df.columns:
         dep = pd.to_datetime(df["departure_ts"], errors="coerce")
-        hour = dep.dt.hour.fillna(12)
+        bad_ts_count = dep.isna().sum()
+        if bad_ts_count > 0:
+            print(f"[pipeline] WARNING: {bad_ts_count} rows have unparseable departure_ts and will be dropped.")
+        df = df[dep.notna()].copy()
+        dep = dep[dep.notna()]
+        hour = dep.dt.hour
         df["hour_of_day"] = hour
-        df["day_of_week"] = dep.dt.dayofweek.fillna(0).astype(int)
+        df["day_of_week"] = dep.dt.dayofweek.astype(int)
         df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
         df["is_night"] = ((df["hour_of_day"] >= 22) | (df["hour_of_day"] <= 6)).astype(int)
-        df["month"] = dep.dt.month.fillna(1).astype(int)
+        df["month"] = dep.dt.month.astype(int)
     else:
         hour = pd.Series(12, index=df.index)
         df["hour_of_day"] = 12
@@ -76,11 +84,14 @@ def load_and_prepare(input_path: str) -> pd.DataFrame:
 
     df["time_bucket"] = pd.cut(
         hour,
-        bins=[-1, 6, 12, 18, 24],
-        labels=["night", "morning", "afternoon", "evening"],
+        bins=[-1, 6, 11, 17, 21, 24],
+        labels=["night", "morning", "afternoon", "evening", "night_late"],
     ).astype(str)
     df["delay_ratio"] = df["actual_transit_minutes"] / df["osrm_eta_minutes"]
+    # Cap at 5x: trips exceeding 5× OSRM ETA are likely data entry errors
+    df["delay_ratio"] = df["delay_ratio"].clip(upper=5.0)
     df["delay_pct"] = (df["actual_transit_minutes"] - df["osrm_eta_minutes"]) / df["osrm_eta_minutes"]
+    df["delay_pct"] = df["delay_pct"].clip(upper=4.0)  # equivalent upper bound for delay_pct
     df["corridor"] = df["source_facility"].astype(str) + "->" + df["dest_facility"].astype(str)
 
     if "promised_eta_minutes" in df.columns:
