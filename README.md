@@ -13,16 +13,18 @@ OSRM-style ETA estimation often underestimates real transit time because it miss
 
 This project builds a graph-aware ETA system that both predicts better and explains where network operations should intervene.
 
-## Outcomes (Latest Run)
+## Outcomes (Latest Real-World Run)
 
-Using real trip data (`delivery_data.csv`) and the final benchmark setup:
+Using the real-world 144k+ row dataset (`trips.csv`) and the finalized pipeline:
 
-- Baseline MAE: `44.43`
-- Graph-Enhanced MAE: `33.02`
-- MAE improvement: `11.41`
-- Baseline Accuracy @ +/-15%: `43.03%`
-- Graph Accuracy @ +/-15%: `55.34%`
-- Accuracy gain: `+12.31 percentage points`
+- Baseline MAE: `46.84`
+- Graph-Enhanced MAE: `36.15`
+- MAE improvement: `10.69`
+- Baseline Accuracy @ +/-15%: `37.02%`
+- Graph Accuracy @ +/-15%: `48.12%`
+- Accuracy gain: `+11.10 percentage points`
+
+*Note: The pipeline now incorporates a robust Pearson correlation stability check (currently scoring 0.681) to ensure the Node2Vec embeddings capture consistent network topologies.*
 
 ## What This Project Delivers
 
@@ -32,7 +34,7 @@ Using real trip data (`delivery_data.csv`) and the final benchmark setup:
 - Baseline vs graph-enhanced ETA benchmark (measured graph advantage)
 - FTL vs Carting decision framework with expected time-cost tradeoff
 - Auto-generated Network Operations strategy memo
-- Streamlit dashboard for stakeholder-facing review
+- Premium glassmorphism Streamlit dashboard for stakeholder-facing review and visualization
 
 ## Architecture
 
