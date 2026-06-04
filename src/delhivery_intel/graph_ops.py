@@ -42,10 +42,12 @@ def build_network_graph(edge_df: pd.DataFrame) -> nx.DiGraph:
     for _, row in graph_edges.iterrows():
         src = row["source_facility"]
         dst = row["dest_facility"]
+        trips_val = int(row["trips"])
         g.add_edge(
             src,
             dst,
-            trips=int(row["trips"]),
+            trips=trips_val,
+            inv_trips=1.0 / trips_val if trips_val > 0 else 1.0,
             median_delay_ratio=float(row["median_delay_ratio"]),
             avg_delay_pct=float(row["avg_delay_pct"]),
             breach_rate=float(row["breach_rate"]),
@@ -58,8 +60,8 @@ def compute_hub_metrics(g: nx.DiGraph) -> pd.DataFrame:
         return pd.DataFrame(columns=["hub", "betweenness", "in_degree", "out_degree", "clustering"])
 
     k_sample = min(100, g.number_of_nodes())
-    betweenness = nx.betweenness_centrality(g, normalized=True, weight="trips", k=k_sample)
-    # weight='trips' biases shortest paths toward high-volume corridors, identifying operational chokepoints rather than topological ones. k=min(100,N) approximates betweenness for large graphs.
+    betweenness = nx.betweenness_centrality(g, normalized=True, weight="inv_trips", k=k_sample)
+    # weight='inv_trips' correctly biases shortest paths toward high-volume corridors (lower inverse weight). k=min(100,N) approximates betweenness for large graphs.
     clustering = nx.clustering(g.to_undirected())
     rows = []
     for n in g.nodes():
