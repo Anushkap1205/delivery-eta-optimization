@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from node2vec import Node2Vec
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from scipy.spatial.distance import cosine
+
+
+def _within_15(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    denom = np.maximum(np.abs(y_true), 1e-6)
+    return float(np.mean(np.abs(y_true - y_pred) / denom <= 0.15))
+
+
+def train_baseline(df: pd.DataFrame) -> dict:
+    features = ["route_type", "time_bucket", "osrm_eta_minutes", "hour_of_day", "day_of_week", "is_weekend", "is_night", "month"]
+    if "distance_km" in df.columns:
+        features.append("distance_km")
+
+    df_sorted = df.sort_values("departure_ts").copy()
+    X = df_sorted[features]
+    y = df_sorted["actual_transit_minutes"].values
+    
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_idx].copy(), X.iloc[split_idx:].copy()
+    y_train, y_test = y[:split_idx], y[split_idx:]
+    
+    # Fix 1: Dumb Baselines
+    # Baseline 1: Median actual time per corridor
+    corridor_medians = df_sorted.iloc[:split_idx].groupby("corridor")["actual_transit_minutes"].median()
+    test_corridors = df_sorted.iloc[split_idx:]["corridor"]
+    median_preds = test_corridors.map(corridor_medians).fillna(df_sorted.iloc[:split_idx]["actual_transit_minutes"].median()).values
+    median_mae = float(mean_absolute_error(y_test, median_preds))
+    median_rmse = float(np.sqrt(mean_squared_error(y_test, median_preds)))
+    
+    # Baseline 2: Linear Regression on distance + hour
+    lr = LinearRegression()
+    lr_features = ["hour_of_day"]
+    if "distance_km" in X_train.columns:
+        lr_features = ["distance_km", "hour_of_day"]
+    lr.fit(X_train[lr_features], y_train)
+    lr_preds = lr.predict(X_test[lr_features])
+    lr_mae = float(mean_absolute_error(y_test, lr_preds))
+    lr_rmse = float(np.sqrt(mean_squared_error(y_test, lr_preds)))
+    
+    print(f"Median Baseline MAE: {median_mae:.2f}, RMSE: {median_rmse:.2f}")
+    print(f"LR Baseline MAE: {lr_mae:.2f}, RMSE: {lr_rmse:.2f}")
+
+    cat_cols = ["route_type", "time_bucket"]
+    num_cols = [c for c in features if c not in cat_cols]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+            ("num", Pipeline([("scale", StandardScaler())]), num_cols),
+        ]
+    )
+    model = RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1)
+    pipe = Pipeline([("prep", preprocessor), ("model", model)])
+    pipe.fit(X_train, y_train)
+    preds = pipe.predict(X_test)
+    rf_mae = float(mean_absolute_error(y_test, preds))
+    rf_rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
+    
+    df_sorted["predicted_eta"] = np.nan
+    df_sorted.iloc[split_idx:, df_sorted.columns.get_loc("predicted_eta")] = preds
+    
+    return {
+        "model": pipe,
+        "features": features,
+        "df_with_preds": df_sorted,
+        "mae": rf_mae,
+        "rmse": rf_rmse,
+        "acc15": _within_15(y_test, preds),
+        "median_mae": median_mae,
+        "median_rmse": median_rmse,
+        "lr_mae": lr_mae,
+        "lr_rmse": lr_rmse,
+        "test_df": X_test.copy(),
+        "y_test": y_test,
+        "preds": preds,
+    }
+
+
+def _node_embeddings(df: pd.DataFrame, dim: int = 16) -> tuple[dict[str, np.ndarray], float]:
+    import networkx as nx
+
+    g = nx.DiGraph()
+    weighted = df.groupby(["source_facility", "dest_facility"]).size().reset_index(name="weight")
+    for _, row in weighted.iterrows():
+        g.add_edge(str(row["source_facility"]), str(row["dest_facility"]), weight=float(row["weight"]))
+
+    if g.number_of_nodes() < 2:
+        return {}, 1.0
+
+    n2v_1 = Node2Vec(g, dimensions=dim, walk_length=20, num_walks=100, workers=1, weight_key="weight", seed=42)
+    w2v_1 = n2v_1.fit(window=5, min_count=1)
+    emb_1 = {node: w2v_1.wv[node] for node in g.nodes()}
+    
+    n2v_2 = Node2Vec(g, dimensions=dim, walk_length=20, num_walks=100, workers=1, weight_key="weight", seed=100)
+    w2v_2 = n2v_2.fit(window=5, min_count=1)
+    emb_2 = {node: w2v_2.wv[node] for node in g.nodes()}
+    
+    sims = []
+    for node in g.nodes():
+        sims.append(1 - cosine(emb_1[node], emb_2[node]))
+    mean_sim = float(np.mean(sims))
+    
+    if mean_sim < 0.85:
+        print(f"WARNING: Node2Vec embeddings are unstable. Mean cosine similarity between runs is {mean_sim:.3f} (< 0.85). Results may not be reliable.")
+        
+    return emb_1, mean_sim
+
+
+def train_graph_enhanced(df: pd.DataFrame) -> dict:
+    split_idx_raw = int(len(df) * 0.8)
+    train_df_raw = df.sort_values("departure_ts").iloc[:split_idx_raw]
+    emb, mean_sim = _node_embeddings(train_df_raw, dim=16)
+    tmp = df.sort_values("departure_ts").copy()
+    for i in range(16):
+        tmp[f"src_emb_{i}"] = tmp["source_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(16))[i])
+        tmp[f"dst_emb_{i}"] = tmp["dest_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(16))[i])
+
+    features = ["route_type", "time_bucket", "osrm_eta_minutes", "hour_of_day", "day_of_week", "is_weekend", "is_night", "month"] + \
+               [f"src_emb_{i}" for i in range(16)] + [f"dst_emb_{i}" for i in range(16)]
+    
+    if "distance_km" in tmp.columns:
+        features.append("distance_km")
+
+    X = tmp[features]
+    y = tmp["actual_transit_minutes"].values
+    
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_idx].copy(), X.iloc[split_idx:].copy()
+    y_train, y_test = y[:split_idx], y[split_idx:]
+
+    cat_cols = ["route_type", "time_bucket"]
+    num_cols = [c for c in features if c not in cat_cols]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+            ("num", StandardScaler(), num_cols),
+        ]
+    )
+    model = RandomForestRegressor(n_estimators=250, random_state=42, n_jobs=-1)
+    pipe = Pipeline([("prep", preprocessor), ("model", model)])
+    pipe.fit(X_train, y_train)
+    preds = pipe.predict(X_test)
+    
+    rf_mae = float(mean_absolute_error(y_test, preds))
+    rf_rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
+    
+    return {
+        "model": pipe,
+        "mae": rf_mae,
+        "rmse": rf_rmse,
+        "acc15": _within_15(y_test, preds),
+        "embedding_stability": mean_sim
+    }
+
