@@ -27,6 +27,10 @@ def build_corridor_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_network_graph(edge_df: pd.DataFrame) -> nx.DiGraph:
+    required = {"source_facility", "dest_facility", "trips", "median_delay_ratio", "avg_delay_pct", "breach_rate"}
+    missing = required - set(edge_df.columns)
+    if missing:
+        raise ValueError(f"build_network_graph expects pre-aggregated edge_df. Missing columns: {sorted(missing)}. Run build_corridor_aggregates() first.")
     # Pre-aggregation is required to prevent DiGraph edge overwriting, keeping original edge_df available separately for FTL/Carting logic
     graph_edges = (
         edge_df.groupby(["source_facility", "dest_facility"])
@@ -59,8 +63,8 @@ def compute_hub_metrics(g: nx.DiGraph) -> pd.DataFrame:
     if g.number_of_nodes() == 0:
         return pd.DataFrame(columns=["hub", "betweenness", "in_degree", "out_degree", "clustering"])
 
-    k_sample = min(100, g.number_of_nodes())
-    betweenness = nx.betweenness_centrality(g, normalized=True, weight="inv_trips", k=k_sample)
+    k_sample = g.number_of_nodes() if g.number_of_nodes() <= 50 else min(100, g.number_of_nodes())
+    betweenness = nx.betweenness_centrality(g, normalized=True, weight="inv_trips", k=None if g.number_of_nodes() <= 50 else k_sample)
     # weight='inv_trips' correctly biases shortest paths toward high-volume corridors (lower inverse weight). k=min(100,N) approximates betweenness for large graphs.
     clustering = nx.clustering(g.to_undirected())
     rows = []
@@ -78,9 +82,10 @@ def compute_hub_metrics(g: nx.DiGraph) -> pd.DataFrame:
         )
     df_metrics = pd.DataFrame(rows)
     if not df_metrics.empty and df_metrics["betweenness"].max() > 0:
+        idw_max = df_metrics["in_degree_weighted"].max()
         df_metrics["risk_score"] = (
             0.5 * df_metrics["betweenness"] / df_metrics["betweenness"].max()
-            + 0.3 * df_metrics["in_degree_weighted"] / df_metrics["in_degree_weighted"].max()
+            + (0.3 * df_metrics["in_degree_weighted"] / idw_max if idw_max > 0 else 0.0)
             + 0.2 * df_metrics["clustering"]
         )
     else:
@@ -88,3 +93,14 @@ def compute_hub_metrics(g: nx.DiGraph) -> pd.DataFrame:
     # betweenness (0.5) captures systemic network dependency; in_degree_weighted (0.3) captures operational inflow load; clustering (0.2) captures redundancy risk.
     return df_metrics
 
+
+def get_top_delay_corridors(corridor_agg: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    """
+    Returns the top-N chronically delayed corridors where actual transit
+    exceeds OSRM ETA by more than 20%, ranked by SLA breach share.
+    Deliverable 2: corridor audit with breach contribution ranking.
+    """
+    chronic = corridor_agg[corridor_agg["chronic_delay"]].copy()
+    chronic = chronic.sort_values("sla_breach_share_pct", ascending=False).head(top_n)
+    return chronic[["source_facility", "dest_facility", "route_type", "time_bucket",
+                     "trips", "avg_delay_pct", "breach_rate", "sla_breach_count", "sla_breach_share_pct"]]

@@ -27,6 +27,7 @@ def _normalize_input_schema(df: pd.DataFrame) -> pd.DataFrame:
         final_rows = out[cutoff.isin(["false", "0"])].copy()
         if final_rows.empty:
             raise ValueError("All rows are cutoff snapshots — no final trip records found. Check is_cutoff column values.")
+        print(f"[pipeline] is_cutoff: dropped {len(out) - len(final_rows)} cutoff-snapshot rows, {len(final_rows)} final records retained.")
         out = final_rows
 
     return out
@@ -67,26 +68,32 @@ def load_and_prepare(input_path: str) -> pd.DataFrame:
         if bad_ts_count > 0:
             print(f"[pipeline] WARNING: {bad_ts_count} rows have unparseable departure_ts and will be dropped.")
         df = df[dep.notna()].copy()
-        dep = dep[dep.notna()]
-        hour = dep.dt.hour
+        dep_clean = pd.to_datetime(df["departure_ts"])
+        hour = dep_clean.dt.hour.values
         df["hour_of_day"] = hour
-        df["day_of_week"] = dep.dt.dayofweek.astype(int)
+        df["day_of_week"] = dep_clean.dt.dayofweek.values.astype(int)
         df["is_weekend"] = df["day_of_week"].isin([5, 6]).astype(int)
         df["is_night"] = ((df["hour_of_day"] >= 22) | (df["hour_of_day"] <= 6)).astype(int)
-        df["month"] = dep.dt.month.astype(int)
+        df["month"] = dep_clean.dt.month.values.astype(int)
+        df["time_bucket"] = pd.cut(
+            hour,
+            bins=[-1, 6, 11, 17, 21, 24],
+            labels=["night", "morning", "afternoon", "evening", "night_late"],
+        ).astype(str)
     else:
-        hour = pd.Series(12, index=df.index)
         df["hour_of_day"] = 12
         df["day_of_week"] = 0
         df["is_weekend"] = 0
         df["is_night"] = 0
         df["month"] = 1
+        hour = df["hour_of_day"].values
+        df["time_bucket"] = pd.cut(
+            hour,
+            bins=[-1, 6, 11, 17, 21, 24],
+            labels=["night", "morning", "afternoon", "evening", "night_late"],
+        ).astype(str)
 
-    df["time_bucket"] = pd.cut(
-        hour,
-        bins=[-1, 6, 11, 17, 21, 24],
-        labels=["night", "morning", "afternoon", "evening", "night_late"],
-    ).astype(str)
+    # Zeros were already excluded by the > 0 filter, so NaN division is not possible (NaN > 0 is False).
     df["delay_ratio"] = df["actual_transit_minutes"] / df["osrm_eta_minutes"]
     # Cap at 5x: trips exceeding 5× OSRM ETA are likely data entry errors
     df["delay_ratio"] = df["delay_ratio"].clip(upper=5.0)

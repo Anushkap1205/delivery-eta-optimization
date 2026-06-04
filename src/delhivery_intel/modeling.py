@@ -70,7 +70,14 @@ def train_baseline(df: pd.DataFrame) -> dict:
     rf_rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
     
     df_sorted["predicted_eta"] = np.nan
-    df_sorted.iloc[split_idx:, df_sorted.columns.get_loc("predicted_eta")] = preds
+    df_sorted.loc[df_sorted.index[split_idx:], "predicted_eta"] = preds
+    
+    rf_acc15 = _within_15(y_test, preds)
+    median_acc15 = _within_15(y_test, median_preds)
+    lr_acc15 = _within_15(y_test, lr_preds)
+    print(f"Median Baseline Acc@15%: {median_acc15:.4f}")
+    print(f"LR Baseline Acc@15%:     {lr_acc15:.4f}")
+    print(f"RF Model Acc@15%:        {rf_acc15:.4f}")
     
     return {
         "model": pipe,
@@ -81,8 +88,10 @@ def train_baseline(df: pd.DataFrame) -> dict:
         "acc15": _within_15(y_test, preds),
         "median_mae": median_mae,
         "median_rmse": median_rmse,
+        "median_acc15": median_acc15,
         "lr_mae": lr_mae,
         "lr_rmse": lr_rmse,
+        "lr_acc15": lr_acc15,
         "test_df": X_test.copy(),
         "y_test": y_test,
         "preds": preds,
@@ -93,6 +102,10 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 32) -> tuple[dict[str, np.ndar
     import networkx as nx
 
     g = nx.DiGraph()
+    if "delay_ratio" not in df.columns:
+        df = df.copy()
+        df["delay_ratio"] = (df["actual_transit_minutes"] / df["osrm_eta_minutes"].replace(0, np.nan)).clip(upper=5.0)
+
     weighted = (
         df.groupby(["source_facility", "dest_facility"])
         .agg(trips=("corridor", "count"), delay_weight=("delay_ratio", "median"))
@@ -118,8 +131,8 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 32) -> tuple[dict[str, np.ndar
         emb_2 = {node: w2v_2.wv[node] for node in g.nodes()}
     
     nodes = list(g.nodes())
-    np.random.seed(42)
-    sample_nodes = np.random.choice(nodes, size=min(len(nodes), 200), replace=False)
+    rng = np.random.default_rng(42)
+    sample_nodes = rng.choice(nodes, size=min(len(nodes), 200), replace=False)
     
     dists_1 = []
     dists_2 = []
@@ -130,8 +143,8 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 32) -> tuple[dict[str, np.ndar
             dists_2.append(1 - cosine(emb_2[n1], emb_2[n2]))
             
     # Add a tiny epsilon to avoid zero variance if embeddings are identical
-    dists_1 = np.array(dists_1) + np.random.normal(0, 1e-8, len(dists_1))
-    dists_2 = np.array(dists_2) + np.random.normal(0, 1e-8, len(dists_2))
+    dists_1 = np.array(dists_1) + rng.normal(0, 1e-8, len(dists_1))
+    dists_2 = np.array(dists_2) + rng.normal(0, 1e-8, len(dists_2))
     
     corr, _ = pearsonr(dists_1, dists_2)
     mean_sim = float(corr)
@@ -144,14 +157,19 @@ def _node_embeddings(df: pd.DataFrame, dim: int = 32) -> tuple[dict[str, np.ndar
 
 
 def train_graph_enhanced(df: pd.DataFrame) -> dict:
-    split_idx_raw = int(len(df) * 0.8)
     df_sorted = df.sort_values("departure_ts").copy() if "departure_ts" in df.columns else df.copy()
+    split_idx_raw = int(len(df_sorted) * 0.8)   # must be after sort
     train_df_raw = df_sorted.iloc[:split_idx_raw]
     emb, mean_sim = _node_embeddings(train_df_raw, dim=32)
     tmp = df_sorted.copy()
     for i in range(32):
         tmp[f"src_emb_{i}"] = tmp["source_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(32))[i])
         tmp[f"dst_emb_{i}"] = tmp["dest_facility"].astype(str).map(lambda x: emb.get(x, np.zeros(32))[i])
+
+    unseen_src = tmp["source_facility"].astype(str).map(lambda x: x not in emb).sum()
+    unseen_dst = tmp["dest_facility"].astype(str).map(lambda x: x not in emb).sum()
+    if unseen_src + unseen_dst > 0:
+        print(f"[modeling] WARNING: {unseen_src} source and {unseen_dst} dest nodes had no embedding (zero-vector fallback used).")
 
     features = ["route_type", "time_bucket", "osrm_eta_minutes", "hour_of_day", "day_of_week", "is_weekend", "is_night", "month"] + \
                [f"src_emb_{i}" for i in range(32)] + [f"dst_emb_{i}" for i in range(32)]
